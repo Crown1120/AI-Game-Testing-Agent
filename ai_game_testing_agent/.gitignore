@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Project specific
+data/reports/*.json
+data/checkpoints.db
+tests/generated_tests/*.py
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+
+# Unity
+unity_server/.vs/
+unity_server/bin/
+unity_server/obj/
+*.csproj
+*.sln
+
+# Claude
+.claude/

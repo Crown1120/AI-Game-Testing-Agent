@@ -1,0 +1,997 @@
+项目名称: AI Game Testing Agent (AI游戏测试智能体系统)
+版本: 1.0.0
+Python版本: 3.13
+作者: 根据用户需求设计
+
+================================================================================
+第一部分：项目概述
+================================================================================
+
+本项目是一个基于 LangGraph 和 LangChain 构建的智能游戏测试系统，包含两个核心智能体：
+1. AI测试员 (Test Agent) - 模拟真实玩家进行探索性黑盒测试，自动发现游戏中的Bug和异常。
+2. AI测试开发员 (Dev Agent) - 分析测试员生成的Bug报告，自动生成 pytest 回归测试代码。
+
+系统设计遵循模块化原则，通过抽象的游戏环境接口 (GameEnvironment) 可适配多种游戏平台
+(如 Pygame 模拟器、Unity 引擎、Web 游戏等)。当前以经典的“推箱子”游戏作为演示环境。
+
+测试类型定位：
+- AI测试员执行的是系统级、探索性、黑盒测试，不依赖内部代码实现。
+- AI测试开发员执行的是灰盒测试，结合状态数据生成针对性回归用例。
+- 整体框架属于基于模型的自动化测试 (MBT) 范畴。
+
+================================================================================
+第二部分：技术栈与环境配置
+================================================================================
+
+- 编程语言: Python 3.13
+- 核心框架: LangGraph >= 0.2.50, LangChain >= 0.3.0
+- 游戏模拟器: Pygame >= 2.6.0 (用于推箱子环境)
+- 测试框架: pytest >= 8.0.0
+- LLM 服务: OpenAI API (GPT-4o) 或 Anthropic Claude API
+- 其他依赖: numpy, matplotlib, python-dotenv, typing-extensions
+
+依赖文件 requirements.txt 内容如下:
+langgraph>=0.2.50
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
+pygame>=2.6.0
+numpy>=2.0.0
+matplotlib>=3.9.0
+pytest>=8.0.0
+python-dotenv>=1.0.0
+typing-extensions>=4.12.0
+
+text
+
+环境变量配置文件 .env.example 内容如下:
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o
+
+text
+
+================================================================================
+第三部分：项目目录结构
+================================================================================
+
+ai_game_testing_agent/
+├── .env                        # 环境变量（需自行创建，不提交Git）
+├── .env.example                # 环境变量示例
+├── .gitignore                  # Git忽略文件
+├── requirements.txt            # Python依赖列表
+├── config.py                   # 全局配置
+├── main.py                     # 主程序入口
+├── cli.py                      # 命令行交互工具
+├── README.md                   # 项目说明文档
+├── game_env/
+│   ├── __init__.py
+│   ├── base_env.py             # 游戏环境抽象基类
+│   └── sokoban_env.py          # 推箱子游戏模拟器实现
+├── agent/
+│   ├── __init__.py
+│   ├── state.py                # LangGraph 共享状态定义
+│   ├── tools.py                # 智能体工具函数
+│   ├── test_agent.py           # AI测试员 LangGraph 图
+│   └── dev_agent.py            # AI测试开发员 LangGraph 图
+├── tests/
+│   ├── __init__.py
+│   ├── test_scenarios.json     # 标准测试场景
+│   └── generated_tests/        # AI生成的测试代码存放目录
+└── data/
+    ├── reports/                # 测试报告输出目录
+    └── maps/                   # 推箱子地图文件目录
+
+================================================================================
+第四部分：详细代码实现
+================================================================================
+
+------------------ 文件: config.py ------------------
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
+    MAX_TEST_STEPS = 100
+    TEMPERATURE = 0.1
+    CHECKPOINT_DB_PATH = "data/checkpoints.db"
+
+config = Config()
+
+------------------ 文件: game_env/__init__.py ------------------
+from .base_env import GameEnvironment
+from .sokoban_env import SokobanEnv
+
+__all__ = ["GameEnvironment", "SokobanEnv"]
+
+------------------ 文件: game_env/base_env.py ------------------
+from abc import ABC, abstractmethod
+from typing import Dict, List, Tuple, Any, Optional
+import numpy as np
+
+class GameEnvironment(ABC):
+    """所有游戏环境必须实现的统一接口"""
+    
+    @abstractmethod
+    def reset(self, level_id: Optional[str] = None) -> Dict[str, Any]:
+        """重置游戏环境到指定关卡，返回初始状态"""
+        pass
+    
+    @abstractmethod
+    def step(self, action: str) -> Tuple[Dict[str, Any], float, bool, Dict]:
+        """执行一个动作，返回 (新状态, 奖励值, 是否结束, 额外信息)"""
+        pass
+    
+    @abstractmethod
+    def get_valid_actions(self) -> List[str]:
+        """返回当前状态下所有合法动作的列表"""
+        pass
+    
+    @abstractmethod
+    def render(self) -> np.ndarray:
+        """以numpy数组（RGB图像）的形式返回游戏当前画面的截图"""
+        pass
+    
+    @abstractmethod
+    def get_state_description(self) -> str:
+        """返回当前游戏状态的文本描述，供LLM理解上下文"""
+        pass
+    
+    @abstractmethod
+    def is_solvable(self) -> bool:
+        """验证当前关卡是否存在可行解（通常使用BFS算法）"""
+        pass
+
+------------------ 文件: game_env/sokoban_env.py ------------------
+import pygame
+import numpy as np
+from typing import Dict, List, Tuple, Any, Optional
+from collections import deque
+import copy
+
+class SokobanEnv(GameEnvironment):
+    """基于 Pygame 的推箱子游戏模拟器"""
+    
+    # 游戏元素映射: 0空地, 1墙, 2目标点, 3箱子在目标上, 4玩家, 5玩家在目标上, 6箱子
+    TILE_MAPPING = {
+        0: ' ', 1: '#', 2: '.', 3: '*', 4: '@', 5: '+', 6: '$'
+    }
+    ACTION_SPACE = ['UP', 'DOWN', 'LEFT', 'RIGHT']
+    DIRECTION_DELTA = {
+        'UP': (-1, 0),
+        'DOWN': (1, 0),
+        'LEFT': (0, -1),
+        'RIGHT': (0, 1)
+    }
+    
+    def __init__(self, map_file: Optional[str] = None, render_mode: str = "text"):
+        self.map_data = None
+        self.player_pos = None
+        self.boxes = set()
+        self.goals = set()
+        self.steps = 0
+        self.max_steps = 500
+        self.render_mode = render_mode
+        self.screen = None
+        self.cell_size = 64
+        
+        # 默认简单地图 (5x5)
+        self.default_map = [
+            "#####",
+            "#@$.#",
+            "#####"
+        ]
+        
+        if map_file:
+            self.load_map(map_file)
+        else:
+            self._load_from_strings(self.default_map)
+        
+        if render_mode == "human":
+            pygame.init()
+            self.screen = pygame.display.set_mode(
+                (len(self.map_data[0]) * self.cell_size, len(self.map_data) * self.cell_size)
+            )
+            pygame.display.set_caption("Sokoban - AI Testing")
+    
+    def _load_from_strings(self, map_strings: List[str]):
+        """从字符串列表解析地图"""
+        self.map_data = []
+        self.boxes = set()
+        self.goals = set()
+        for r, line in enumerate(map_strings):
+            row = []
+            for c, ch in enumerate(line):
+                if ch == '#':
+                    row.append(1)
+                elif ch == '.':
+                    row.append(2)
+                    self.goals.add((r, c))
+                elif ch == '*':
+                    row.append(3)
+                    self.boxes.add((r, c))
+                    self.goals.add((r, c))
+                elif ch == '@':
+                    row.append(4)
+                    self.player_pos = (r, c)
+                elif ch == '+':
+                    row.append(5)
+                    self.player_pos = (r, c)
+                    self.goals.add((r, c))
+                elif ch == '$':
+                    row.append(6)
+                    self.boxes.add((r, c))
+                else:
+                    row.append(0)
+            self.map_data.append(row)
+    
+    def load_map(self, file_path: str):
+        """从文件加载地图"""
+        with open(file_path, 'r') as f:
+            lines = [line.rstrip('\n') for line in f if line.strip()]
+        self._load_from_strings(lines)
+    
+    def reset(self, level_id: Optional[str] = None) -> Dict[str, Any]:
+        """重置环境"""
+        if level_id and level_id != "default":
+            map_path = f"data/maps/{level_id}.txt"
+            if os.path.exists(map_path):
+                self.load_map(map_path)
+        else:
+            self._load_from_strings(self.default_map)
+        self.steps = 0
+        return self.get_state_description()
+    
+    def step(self, action: str) -> Tuple[Dict[str, Any], float, bool, Dict]:
+        """执行动作"""
+        self.steps += 1
+        reward = 0.0
+        info = {"success": False, "box_moved": False}
+        
+        if action not in self.ACTION_SPACE:
+            info["error"] = f"Invalid action: {action}"
+            return self.get_state_description(), reward, self._is_done(), info
+        
+        dr, dc = self.DIRECTION_DELTA[action]
+        r, c = self.player_pos
+        nr, nc = r + dr, c + dc
+        
+        # 检查墙壁
+        if self.map_data[nr][nc] == 1:
+            info["error"] = "Hit wall"
+            return self.get_state_description(), -0.1, self._is_done(), info
+        
+        # 检查箱子
+        if (nr, nc) in self.boxes:
+            nnr, nnc = nr + dr, nc + dc
+            if self.map_data[nnr][nnc] == 1 or (nnr, nnc) in self.boxes:
+                info["error"] = "Cannot push box"
+                return self.get_state_description(), -0.1, self._is_done(), info
+            # 移动箱子
+            self.boxes.remove((nr, nc))
+            self.boxes.add((nnr, nnc))
+            info["box_moved"] = True
+            reward = 1.0 if (nnr, nnc) in self.goals else 0.2
+        
+        # 移动玩家
+        self.player_pos = (nr, nc)
+        info["success"] = True
+        
+        state = self.get_state_description()
+        done = self._is_done()
+        if done and self._all_boxes_on_goals():
+            reward = 10.0
+        elif self.steps >= self.max_steps:
+            done = True
+            reward = -1.0
+        
+        return state, reward, done, info
+    
+    def get_valid_actions(self) -> List[str]:
+        """返回当前状态下合法的动作"""
+        valid = []
+        for action in self.ACTION_SPACE:
+            dr, dc = self.DIRECTION_DELTA[action]
+            r, c = self.player_pos
+            nr, nc = r + dr, c + dc
+            if self.map_data[nr][nc] != 1:
+                if (nr, nc) in self.boxes:
+                    nnr, nnc = nr + dr, nc + dc
+                    if self.map_data[nnr][nnc] != 1 and (nnr, nnc) not in self.boxes:
+                        valid.append(action)
+                else:
+                    valid.append(action)
+        return valid
+    
+    def render(self) -> np.ndarray:
+        """渲染当前画面为numpy数组"""
+        if self.render_mode == "human" and self.screen:
+            self._render_pygame()
+            pygame.display.flip()
+        # 返回伪图像数据（实际可使用 pygame.surfarray.array3d）
+        return np.zeros((100, 100, 3), dtype=np.uint8)
+    
+    def _render_pygame(self):
+        """Pygame 渲染"""
+        colors = {
+            0: (255, 255, 255),  # 空地
+            1: (100, 100, 100),  # 墙
+            2: (255, 200, 200),  # 目标点
+            3: (200, 150, 50),   # 箱子在目标上
+            4: (0, 0, 255),      # 玩家
+            5: (0, 255, 0),      # 玩家在目标上
+            6: (139, 69, 19)     # 箱子
+        }
+        for r in range(len(self.map_data)):
+            for c in range(len(self.map_data[0])):
+                tile = self.map_data[r][c]
+                color = colors.get(tile, (255, 255, 255))
+                pygame.draw.rect(self.screen, color,
+                                 (c*self.cell_size, r*self.cell_size, self.cell_size, self.cell_size))
+                if (r, c) in self.boxes:
+                    pygame.draw.circle(self.screen, (139, 69, 19),
+                                       (c*self.cell_size+32, r*self.cell_size+32), 20)
+                if (r, c) == self.player_pos:
+                    pygame.draw.circle(self.screen, (0, 0, 255),
+                                       (c*self.cell_size+32, r*self.cell_size+32), 20)
+    
+    def get_state_description(self) -> Dict[str, Any]:
+        """返回文本形式的状态描述"""
+        rows = len(self.map_data)
+        cols = len(self.map_data[0])
+        grid = [[' ' for _ in range(cols)] for _ in range(rows)]
+        for r in range(rows):
+            for c in range(cols):
+                if self.map_data[r][c] == 1:
+                    grid[r][c] = '#'
+                elif (r, c) in self.goals:
+                    grid[r][c] = '.'
+        for box in self.boxes:
+            grid[box[0]][box[1]] = '*' if box in self.goals else '$'
+        pr, pc = self.player_pos
+        grid[pr][pc] = '+' if (pr, pc) in self.goals else '@'
+        
+        grid_str = '\n'.join(''.join(row) for row in grid)
+        return {
+            "grid": grid_str,
+            "player_pos": self.player_pos,
+            "boxes": list(self.boxes),
+            "goals": list(self.goals),
+            "steps": self.steps,
+            "boxes_on_goal": sum(1 for box in self.boxes if box in self.goals),
+            "total_goals": len(self.goals),
+            "valid_actions": self.get_valid_actions()
+        }
+    
+    def _all_boxes_on_goals(self) -> bool:
+        """检查是否所有箱子都在目标点上"""
+        return all(box in self.goals for box in self.boxes)
+    
+    def _is_done(self) -> bool:
+        """游戏是否结束"""
+        return self._all_boxes_on_goals() or self.steps >= self.max_steps
+    
+    def is_solvable(self) -> bool:
+        """使用BFS检查当前关卡是否可解（简化版）"""
+        # 此处可扩展完整BFS求解器，返回True/False
+        return True
+
+------------------ 文件: agent/__init__.py ------------------
+from .test_agent import create_test_agent
+from .dev_agent import create_dev_agent
+
+__all__ = ["create_test_agent", "create_dev_agent"]
+
+------------------ 文件: agent/state.py ------------------
+from typing import TypedDict, List, Dict, Any, Optional
+from typing_extensions import Annotated
+import operator
+
+class TestAgentState(TypedDict):
+    """AI测试员的状态定义"""
+    # 游戏核心状态
+    game_state: Dict[str, Any]
+    valid_actions: List[str]
+    current_level: Optional[str]
+    
+    # AI推理信息
+    observation: str
+    reasoning: str
+    next_action: Optional[str]
+    
+    # 测试管理
+    steps_taken: int
+    max_steps: int
+    bugs_found: Annotated[List[Dict[str, Any]], operator.add]
+    
+    # 控制流
+    is_finished: bool
+    should_continue: bool
+    error_message: Optional[str]
+
+class DevAgentState(TypedDict):
+    """AI测试开发员的状态定义"""
+    # 输入
+    test_report: Dict[str, Any]
+    bug_list: List[Dict[str, Any]]
+    
+    # 分析结果
+    failure_patterns: List[str]
+    coverage_gaps: List[str]
+    
+    # 生成产物
+    generated_code: str
+    test_plan: Dict[str, Any]
+    
+    # 验证结果
+    code_valid: bool
+    execution_result: Optional[Dict[str, Any]]
+
+------------------ 文件: agent/tools.py ------------------
+import json
+import os
+from typing import Dict, Any, List
+from langchain_core.tools import tool
+
+@tool
+def save_report(report: Dict[str, Any], filename: str = "test_report.json") -> str:
+    """将测试报告保存为JSON文件"""
+    os.makedirs("data/reports", exist_ok=True)
+    path = os.path.join("data/reports", filename)
+    with open(path, 'w') as f:
+        json.dump(report, f, indent=2)
+    return f"Report saved to {path}"
+
+@tool
+def read_bug_list(filename: str) -> List[Dict[str, Any]]:
+    """读取历史Bug列表"""
+    path = os.path.join("data/reports", filename)
+    if not os.path.exists(path):
+        return []
+    with open(path, 'r') as f:
+        data = json.load(f)
+    return data.get("bugs", [])
+
+------------------ 文件: agent/test_agent.py ------------------
+import os
+from typing import Dict, Any
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from config import config
+from .state import TestAgentState
+
+# 初始化LLM
+llm = ChatOpenAI(
+    model=config.LLM_MODEL,
+    temperature=config.TEMPERATURE,
+    api_key=config.OPENAI_API_KEY,
+    base_url=config.OPENAI_BASE_URL
+)
+
+def observe_and_reason(state: TestAgentState) -> Dict[str, Any]:
+    """观察游戏状态并推理下一步"""
+    game_state = state['game_state']
+    valid_actions = state.get('valid_actions', [])
+    
+    system_prompt = """你是一个专业的游戏测试员。你的任务是：
+    1. 分析当前游戏状态
+    2. 规划下一步行动策略
+    3. 识别潜在的Bug或异常情况
+    
+    请以JSON格式输出，包含 reasoning 和 observation 字段。"""
+    
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"当前状态: {game_state}\n可行动作: {valid_actions}")
+    ])
+    
+    # 简化处理：直接使用响应内容
+    content = response.content
+    return {
+        "observation": content,
+        "reasoning": content
+    }
+
+def decide_action(state: TestAgentState) -> Dict[str, Any]:
+    """从可行动作中选择一个"""
+    reasoning = state.get('reasoning', '')
+    valid_actions = state.get('valid_actions', [])
+    
+    if not valid_actions:
+        return {"next_action": None, "should_continue": False}
+    
+    prompt = f"""基于以下推理，选择下一步动作。只输出动作名称（UP/DOWN/LEFT/RIGHT之一）。
+    
+推理内容: {reasoning}
+可选项: {valid_actions}
+"""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    chosen = response.content.strip().upper()
+    if chosen not in valid_actions:
+        chosen = valid_actions[0]
+    
+    return {"next_action": chosen}
+
+def execute_action(state: TestAgentState, env) -> Dict[str, Any]:
+    """执行动作并更新状态（此节点需要外部环境注入）"""
+    # 注意：实际执行需要将 env 通过 partial 或闭包传入
+    # 这里仅返回占位，实际运行时在 create_test_agent 中绑定
+    return {}
+
+def validate_state(state: TestAgentState) -> Dict[str, Any]:
+    """验证游戏状态是否异常"""
+    game_state = state['game_state']
+    bugs = []
+    
+    # 检查玩家位置合法性
+    if game_state.get('player_pos') is None:
+        bugs.append({
+            "type": "player_out_of_bounds",
+            "severity": "high",
+            "description": "玩家位置丢失",
+            "step": state['steps_taken']
+        })
+    
+    # 检查箱子数量是否与目标点匹配
+    if game_state.get('total_goals', 0) != len(game_state.get('boxes', [])):
+        bugs.append({
+            "type": "box_goal_mismatch",
+            "severity": "medium",
+            "description": "箱子数量与目标点数量不匹配",
+            "step": state['steps_taken']
+        })
+    
+    return {"bugs_found": bugs}
+
+def should_continue(state: TestAgentState) -> str:
+    """判断是否继续执行"""
+    if state.get('is_finished', False):
+        return "end"
+    if state.get('steps_taken', 0) >= state.get('max_steps', 100):
+        return "end"
+    if not state.get('should_continue', True):
+        return "end"
+    return "continue"
+
+def create_test_agent(env):
+    """创建AI测试员 LangGraph 图，绑定游戏环境"""
+    
+    def execute_action_bound(state: TestAgentState) -> Dict[str, Any]:
+        """绑定了环境的动作执行节点"""
+        action = state.get('next_action')
+        if not action:
+            return {"should_continue": False}
+        
+        new_state, reward, done, info = env.step(action)
+        steps = state.get('steps_taken', 0) + 1
+        
+        return {
+            "game_state": new_state,
+            "valid_actions": env.get_valid_actions(),
+            "steps_taken": steps,
+            "is_finished": done,
+            "should_continue": not done
+        }
+    
+    workflow = StateGraph(TestAgentState)
+    
+    # 添加节点
+    workflow.add_node("observe", observe_and_reason)
+    workflow.add_node("decide", decide_action)
+    workflow.add_node("execute", execute_action_bound)
+    workflow.add_node("validate", validate_state)
+    
+    # 添加边
+    workflow.set_entry_point("observe")
+    workflow.add_edge("observe", "decide")
+    workflow.add_edge("decide", "execute")
+    workflow.add_edge("execute", "validate")
+    workflow.add_conditional_edges(
+        "validate",
+        should_continue,
+        {
+            "continue": "observe",
+            "end": END
+        }
+    )
+    
+    return workflow.compile()
+
+------------------ 文件: agent/dev_agent.py ------------------
+import os
+import ast
+from typing import Dict, Any, List
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from config import config
+from .state import DevAgentState
+
+llm = ChatOpenAI(
+    model=config.LLM_MODEL,
+    temperature=0.2,
+    api_key=config.OPENAI_API_KEY,
+    base_url=config.OPENAI_BASE_URL
+)
+
+def analyze_failures(state: DevAgentState) -> Dict[str, Any]:
+    """分析Bug列表，提取失败模式"""
+    bug_list = state.get('bug_list', [])
+    if not bug_list:
+        return {"failure_patterns": []}
+    
+    prompt = f"""分析以下游戏测试中发现的Bug列表，总结出3-5个常见的失败模式。
+每个模式用一句话描述，以列表形式返回。
+
+Bug列表:
+{bug_list}
+"""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    patterns = [p.strip() for p in response.content.split('\n') if p.strip()]
+    return {"failure_patterns": patterns}
+
+def generate_test_code(state: DevAgentState) -> Dict[str, Any]:
+    """根据失败模式生成 pytest 测试代码"""
+    patterns = state.get('failure_patterns', [])
+    
+    prompt = f"""基于以下失败模式，生成 pytest 格式的自动化测试代码。
+要求：
+- 包含必要的 import 语句
+- 每个失败模式对应至少一个测试函数
+- 函数名以 test_ 开头
+- 包含适当的断言
+- 使用项目中的 SokobanEnv 类
+
+失败模式:
+{chr(10).join(patterns)}
+"""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    code = response.content
+    # 提取代码块（如果被包裹在```python```中）
+    if "```python" in code:
+        code = code.split("```python")[1].split("```")[0]
+    elif "```" in code:
+        code = code.split("```")[1].split("```")[0]
+    
+    return {"generated_code": code.strip()}
+
+def validate_code(state: DevAgentState) -> Dict[str, Any]:
+    """验证生成的Python代码语法"""
+    code = state.get('generated_code', '')
+    try:
+        ast.parse(code)
+        valid = True
+    except SyntaxError as e:
+        valid = False
+        state['execution_result'] = {"error": str(e)}
+    
+    return {"code_valid": valid}
+
+def should_regenerate(state: DevAgentState) -> str:
+    """判断是否需要重新生成"""
+    if state.get('code_valid', False):
+        return "save"
+    # 简单起见，直接结束
+    return "save"
+
+def create_dev_agent():
+    """创建AI测试开发员 LangGraph 图"""
+    workflow = StateGraph(DevAgentState)
+    
+    workflow.add_node("analyze", analyze_failures)
+    workflow.add_node("generate", generate_test_code)
+    workflow.add_node("validate", validate_code)
+    
+    workflow.set_entry_point("analyze")
+    workflow.add_edge("analyze", "generate")
+    workflow.add_edge("generate", "validate")
+    workflow.add_conditional_edges(
+        "validate",
+        should_regenerate,
+        {
+            "save": END,
+            "regenerate": "generate"
+        }
+    )
+    
+    return workflow.compile()
+
+------------------ 文件: tests/__init__.py ------------------
+# 测试模块初始化
+
+------------------ 文件: tests/test_scenarios.json ------------------
+{
+  "scenarios": [
+    {
+      "id": "basic_push",
+      "description": "基本推箱子测试",
+      "map": ["#####", "#@$.#", "#####"],
+      "expected_steps": 10
+    }
+  ]
+}
+
+------------------ 文件: main.py ------------------
+#!/usr/bin/env python3
+"""
+AI游戏测试系统主入口
+"""
+import os
+import sys
+import json
+from datetime import datetime
+from dotenv import load_dotenv
+
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+load_dotenv()
+
+from game_env import SokobanEnv
+from agent import create_test_agent, create_dev_agent
+from agent.state import TestAgentState, DevAgentState
+from config import config
+
+def run_test_session(level_id: str = "default", max_steps: int = 50):
+    """运行一次完整的测试会话"""
+    print(f"🚀 启动AI游戏测试会话 (关卡: {level_id})")
+    
+    # 初始化游戏环境
+    env = SokobanEnv()
+    env.reset(level_id)
+    
+    # 创建测试员智能体
+    test_agent = create_test_agent(env)
+    
+    # 初始状态
+    initial_state: TestAgentState = {
+        "game_state": env.get_state_description(),
+        "valid_actions": env.get_valid_actions(),
+        "current_level": level_id,
+        "observation": "",
+        "reasoning": "",
+        "next_action": None,
+        "steps_taken": 0,
+        "max_steps": max_steps,
+        "bugs_found": [],
+        "is_finished": False,
+        "should_continue": True,
+        "error_message": None
+    }
+    
+    print("🎮 AI测试员开始探索...")
+    final_state = test_agent.invoke(initial_state)
+    
+    print(f"✅ 探索完成，共执行 {final_state['steps_taken']} 步")
+    print(f"🐞 发现 {len(final_state['bugs_found'])} 个潜在Bug")
+    
+    # 生成测试报告
+    report = {
+        "session_id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "level": level_id,
+        "steps_taken": final_state['steps_taken'],
+        "bugs": final_state['bugs_found'],
+        "final_game_state": final_state['game_state']
+    }
+    
+    os.makedirs("data/reports", exist_ok=True)
+    report_path = f"data/reports/report_{report['session_id']}.json"
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=2)
+    print(f"📄 测试报告已保存: {report_path}")
+    
+    # 启动测试开发员
+    if final_state['bugs_found']:
+        print("\n🛠️ AI测试开发员开始分析并生成回归测试...")
+        dev_agent = create_dev_agent()
+        
+        dev_state: DevAgentState = {
+            "test_report": report,
+            "bug_list": final_state['bugs_found'],
+            "failure_patterns": [],
+            "coverage_gaps": [],
+            "generated_code": "",
+            "test_plan": {},
+            "code_valid": False,
+            "execution_result": None
+        }
+        
+        dev_result = dev_agent.invoke(dev_state)
+        
+        # 保存生成的测试代码
+        os.makedirs("tests/generated_tests", exist_ok=True)
+        code_path = f"tests/generated_tests/test_autogen_{report['session_id']}.py"
+        with open(code_path, 'w') as f:
+            f.write(dev_result.get('generated_code', '# No code generated'))
+        print(f"📝 已生成测试代码: {code_path}")
+        print(f"🔍 代码语法验证: {'通过' if dev_result.get('code_valid') else '失败'}")
+    else:
+        print("✨ 未发现Bug，跳过测试代码生成。")
+    
+    print("\n🎉 测试会话完成！")
+    return report
+
+def main():
+    """主函数"""
+    import argparse
+    parser = argparse.ArgumentParser(description="AI游戏测试系统")
+    parser.add_argument("--level", type=str, default="default", help="关卡ID")
+    parser.add_argument("--steps", type=int, default=50, help="最大测试步数")
+    args = parser.parse_args()
+    
+    run_test_session(args.level, args.steps)
+
+if __name__ == "__main__":
+    main()
+
+------------------ 文件: cli.py ------------------
+#!/usr/bin/env python3
+"""
+命令行交互界面，用于手动调试
+"""
+import cmd
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from game_env import SokobanEnv
+from agent import create_test_agent
+
+class GameTestCLI(cmd.Cmd):
+    intro = "欢迎使用AI游戏测试系统 CLI。输入 help 查看命令。"
+    prompt = "(ai-test) "
+    
+    def __init__(self):
+        super().__init__()
+        self.env = SokobanEnv(render_mode="human")
+        self.env.reset()
+        self.agent = None
+    
+    def do_show(self, arg):
+        """显示当前游戏状态"""
+        state = self.env.get_state_description()
+        print(state['grid'])
+        print(f"可行动作: {state['valid_actions']}")
+        print(f"步数: {state['steps']}")
+    
+    def do_move(self, arg):
+        """执行移动: move UP/DOWN/LEFT/RIGHT"""
+        arg = arg.strip().upper()
+        if arg in ['UP', 'DOWN', 'LEFT', 'RIGHT']:
+            state, reward, done, info = self.env.step(arg)
+            self.do_show("")
+            if done:
+                print("游戏结束！")
+        else:
+            print("无效动作，请使用 UP/DOWN/LEFT/RIGHT")
+    
+    def do_reset(self, arg):
+        """重置游戏"""
+        self.env.reset()
+        self.do_show("")
+    
+    def do_run_agent(self, arg):
+        """运行AI测试员"""
+        steps = int(arg) if arg.isdigit() else 20
+        self.agent = create_test_agent(self.env)
+        initial = {
+            "game_state": self.env.get_state_description(),
+            "valid_actions": self.env.get_valid_actions(),
+            "steps_taken": 0,
+            "max_steps": steps,
+            "bugs_found": [],
+            "should_continue": True,
+            "is_finished": False,
+        }
+        print(f"运行AI测试员，最大步数: {steps}")
+        result = self.agent.invoke(initial)
+        print(f"完成。步数: {result['steps_taken']}, 发现Bug: {len(result['bugs_found'])}")
+    
+    def do_exit(self, arg):
+        """退出"""
+        print("再见！")
+        return True
+    
+    def do_quit(self, arg):
+        return self.do_exit(arg)
+
+if __name__ == "__main__":
+    GameTestCLI().cmdloop()
+
+------------------ 文件: .gitignore ------------------
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Project specific
+data/reports/*.json
+data/checkpoints.db
+tests/generated_tests/*.py
+*.log
+
+------------------ 文件: README.md ------------------
+# AI Game Testing Agent
+
+基于 LangGraph 和 LangChain 构建的智能游戏测试系统。
+
+## 功能特性
+- **AI测试员**: 模拟玩家行为，执行探索性黑盒测试，自动发现Bug。
+- **AI测试开发员**: 分析Bug报告，自动生成 pytest 回归测试代码。
+- **可扩展架构**: 通过 `GameEnvironment` 抽象接口支持多种游戏平台（Pygame、Unity、Web等）。
+
+## 环境要求
+- Python 3.13+
+- OpenAI API Key (或兼容的LLM服务)
+
+## 快速开始
+
+1. 克隆项目并安装依赖:
+```bash
+git clone <repo-url>
+cd ai_game_testing_agent
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+配置环境变量:
+
+bash
+cp .env.example .env
+# 编辑 .env 文件，填入你的 OPENAI_API_KEY
+运行测试:
+
+bash
+# 运行完整测试会话
+python main.py --level default --steps 50
+
+# 进入交互式CLI
+python cli.py
+测试类型说明
+本项目实现的测试类型:
+
+系统测试: 测试完整运行的游戏关卡。
+
+黑盒测试: AI测试员仅通过游戏画面和状态文本进行决策，不依赖内部代码。
+
+探索性测试: AI测试员动态生成测试路径，无预设脚本。
+
+回归测试: AI测试开发员生成的 pytest 代码用于验证Bug修复。
+
+项目结构
+详见上文目录结构。
+
+许可证
+MIT
+
+================================================================================
+第五部分：运行与测试指南
+================================================================================
+
+确保 Python 3.13 已安装。
+
+创建虚拟环境并激活。
+
+执行 pip install -r requirements.txt。
+
+复制 .env.example 为 .env 并填写有效的 OpenAI API Key。
+
+运行 python main.py 进行完整测试流程。
+
+运行 python cli.py 可手动控制游戏或调用AI代理。

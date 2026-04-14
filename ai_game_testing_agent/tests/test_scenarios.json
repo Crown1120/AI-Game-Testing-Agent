@@ -1,0 +1,10 @@
+{
+  "scenarios": [
+    {
+      "id": "basic_push",
+      "description": "基本推箱子测试",
+      "map": ["#####", "#@$.#", "#####"],
+      "expected_steps": 10
+    }
+  ]
+}

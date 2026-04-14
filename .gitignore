@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+
+# Unity
+*.csproj
+*.sln
+.vs/
+bin/
+obj/
+
+# Claude
+.claude/
+
+# Project specific
+ai_game_testing_agent/data/reports/*.json
+ai_game_testing_agent/data/checkpoints.db
+ai_game_testing_agent/tests/generated_tests/*.py
+*.log
