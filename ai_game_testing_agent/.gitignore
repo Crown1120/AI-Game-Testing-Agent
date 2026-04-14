@@ -43,6 +43,3 @@ unity_server/bin/
 unity_server/obj/
 *.csproj
 *.sln
-
-# Claude
-.claude/
